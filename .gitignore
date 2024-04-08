@@ -1,2 +1,4 @@
 *data
 *pretrainedvit_weights
+*__pycache__*
+model_weights
