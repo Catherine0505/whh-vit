@@ -63,11 +63,11 @@ def validation(dataset_test, checkpoint_file, train_by):
 
 
 
-############################################################################
-#   Collective model with multi-view. Validate by subject.
-############################################################################
+########################################################################################
+#   Collective model with multi-view. No fusion with image feature, Validate by subject.
+########################################################################################
     
-def validate_collective(dataset_test, test_bs, save_weight_folder, eval_method="best"): 
+def validate_collective_nofusion(dataset_test, test_bs, save_weight_folder, eval_method="best"): 
 
     save_weight_path = pathlib.Path(save_weight_folder)
 
@@ -81,7 +81,7 @@ def validate_collective(dataset_test, test_bs, save_weight_folder, eval_method="
     path_identifier = path_identifier[0]
 
     trainedlinearhead_save_path = \
-        pathlib.Path(save_weight_path / "trainedlinearhead_weights" / path_identifier / f"lr0.001")
+        pathlib.Path(save_weight_path / "trainedlinearhead_weights" / path_identifier/ "collective_nofusion" / f"lr0.001")
     checkpoint_file = trainedlinearhead_save_path / f"{eval_method}_weight.pth"
     
 
@@ -136,10 +136,88 @@ def validate_collective(dataset_test, test_bs, save_weight_folder, eval_method="
     plt.savefig(save_weight_path / "training_curve" / path_identifier / "lr0.001" / f"preds_{eval_method}.png")
     plt.close()
 
+
+
+
+########################################################################################
+#   Collective model with multi-view. Append with image feature, Validate by images.
+########################################################################################
+    
+def validate_collective_appendfusion(dataset_test, test_bs, save_weight_folder, eval_method="best"): 
+
+    save_weight_path = pathlib.Path(save_weight_folder)
+
+    dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=test_bs, shuffle=False)
+    
+    pretrainedvit_save_path = save_weight_path / "pretrainedvit_weights"
+    
+    path_identifier = [f for f in os.listdir(pretrainedvit_save_path) \
+                       if os.path.isdir(pretrainedvit_save_path / f) and f[0] != "."]
+    assert len(path_identifier) == 1 
+    path_identifier = path_identifier[0]
+
+    trainedlinearhead_save_path = \
+        pathlib.Path(save_weight_path / "trainedlinearhead_weights" / path_identifier/ "collective_appendfusion" / f"lr0.0003")
+    checkpoint_file = trainedlinearhead_save_path / f"{eval_method}_weight.pth"
+    
+
+    model = ViTModel.from_pretrained('google/vit-base-patch16-224', add_pooling_layer=False,
+                                    cache_dir=pretrainedvit_save_path)
+    model = model.cuda()
+    linear_head = LinearHead(input_dim=768*2, hidden_features=[768, 256, 128, 64, 32, 8], output_dim=1)
+    linear_head.load_state_dict(torch.load(checkpoint_file))
+    linear_head = linear_head.cuda()
+    preprocessor = ViTImageProcessor(do_resize=True, size={"height": 224, "width": 224}, 
+                                    do_rescale=False, do_normalize=False)
+    
+    preds = np.array([])
+    gts = np.array([])
+    for batch in dataloader_test: 
+        x, y = batch["images"].cuda(), batch["labels"].cuda()
+
+        n = x.shape[1]
+        x = einops.rearrange(x, "b n c h w -> (b n) c h w")
+        y = einops.rearrange(y, "b n c -> (b n) c")
+
+        x = preprocessor.preprocess(x, return_tensors="pt", 
+            data_format="channels_first", input_data_format="channels_first")
+        
+        x = x.to("cuda")
+        y = y.cuda()
+
+        with torch.no_grad():
+            outputs = model(**x)
+
+        outputs = outputs.last_hidden_state[:, 0]
+        outputs = einops.rearrange(outputs, "(b n) c -> b n c", n=n)
+        outputs_mean = outputs.mean(dim=1).unsqueeze(dim=1).repeat([1, n, 1])
+        outputs = torch.concatenate([outputs, outputs_mean], dim=-1)
+        outputs = einops.rearrange(outputs, "b n c -> (b n) c")
+        outputs = linear_head(outputs)
+
+        preds = np.concatenate([preds, outputs.flatten().detach().cpu().numpy()])
+        gts = np.concatenate([gts, y.flatten().detach().cpu().numpy()])
+    
+    assert len(preds) == len(gts)
+    print(f"Tested on {len(preds)} images. With {eval_method} checkpoint.")
+
+    mse = ((gts - preds) ** 2).mean()
+    mae = np.abs(gts - preds).mean()
+    acc = (np.abs(gts - preds) <= 2).sum() / len(preds) * 100
+    print(f"MSE: {mse}   MAE: {mae}   Accuracy within 2cm: {acc}%")
+
+    plt.plot(gts, preds, ".")
+    plt.plot(gts, gts, color="r")  
+    plt.xlabel("Ground Truth")  
+    plt.ylabel("Predictions")
+    plt.title("Prediction Plot")
+    plt.savefig(save_weight_path / "training_curve" / path_identifier / "collective_appendfusion" / "lr0.0003" / f"preds_{eval_method}.png")
+    plt.close()
+
     
 
 
 dataset_test = dataset.ChildSubjectGroupDataset(root_folder="/homes/1/sg1526/misc/data", type="test")
-validate_collective(dataset_test=dataset_test, test_bs=4, 
+validate_collective_appendfusion(dataset_test=dataset_test, test_bs=4, 
                     save_weight_folder="/autofs/space/celer_001/users/catherine_gai/misc/model_weights", 
-                    eval_method="last")
+                    eval_method="best")
